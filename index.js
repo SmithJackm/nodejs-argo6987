@@ -7,17 +7,17 @@ const path = require("path");
 const { promisify } = require('util');
 const exec = promisify(require('child_process').exec);
 
-// --- 环境变量配置 (Railway) ---
+// --- 环境变量配置 (Railway 会自动注入 PORT，其余可手动设置) ---
 const UPLOAD_URL = process.env.UPLOAD_URL || '';      
 const PROJECT_URL = process.env.PROJECT_URL || '';    
 const AUTO_ACCESS = process.env.AUTO_ACCESS || false; 
-const FILE_PATH = process.env.FILE_PATH || '/tmp';   
+const FILE_PATH = process.env.FILE_PATH || '/tmp';   // Railway 建议使用 /tmp 目录
 const SUB_PATH = process.env.SUB_PATH || 'sub';       
 const PORT = process.env.SERVER_PORT || process.env.PORT || 3000;        
 const UUID = process.env.UUID || '87491c56-73a4-4995-8d6f-c067d24dee47'; 
 const NEZHA_SERVER = process.env.NEZHA_SERVER || '';        
 const NEZHA_KEY = process.env.NEZHA_KEY || '';              
-const ARGO_DOMAIN = process.env.ARGO_DOMAIN || 'oko.kkm.qzz.io';          
+const ARGO_DOMAIN = process.env.ARGO_DOMAIN || 'oko.kkm.qzz.io'; 
 const ARGO_AUTH = process.env.ARGO_AUTH || 'eyJhIjoiYTI3MzM2ZmM3MDlmYWQ4OWI4ZmQ1OTE0MTI1YWFmMmYiLCJ0IjoiYjI3MzllY2UtZTUzMy00ZTQ1LWEyODItMGNhMDUyYjZmNDNkIiwicyI6IlpEZzRNRGczWm1JdFl6UmtNaTAwTTJSa0xUbGlNak10T0Rkak1HRmtaalkzT0dabCJ9';              
 const ARGO_PORT = process.env.ARGO_PORT || 8001;            
 const CFIP = process.env.CFIP || 'cdns.doon.eu.org';        
@@ -32,7 +32,7 @@ const configPath = path.join(FILE_PATH, 'config.json');
 
 if (!fs.existsSync(FILE_PATH)) fs.mkdirSync(FILE_PATH, { recursive: true });
 
-// --- 核心逻辑 1: 生成 2026 版三协议 XHTTP 配置文件 ---
+// --- 1. 生成 XHTTP 三协议配置文件 (适配 Xray v25+) ---
 async function generateConfig() {
   const config = {
     log: { access: '/dev/null', error: '/dev/null', loglevel: 'none' },
@@ -71,44 +71,34 @@ async function generateConfig() {
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 }
 
-// --- 核心逻辑 2: 修正订阅链接生成逻辑，确保三节点 ---
+// --- 2. 生成订阅链接 (VLESS, VMess, Trojan) ---
 async function generateLinks(argoDomain) {
   const ISP = await getMetaInfo();
   const nodeName = NAME ? `${NAME}-${ISP}` : ISP;
 
-  // 1. VLESS XHTTP
   const vless = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argoDomain}&fp=firefox&type=xhttp&mode=packet-up&host=${argoDomain}&path=%2Fvless-argo#${nodeName}_VLESS_2026`;
-  
-  // 2. VMess XHTTP
   const vmessJson = { v: '2', ps: `${nodeName}_VMess_2026`, add: CFIP, port: CFPORT, id: UUID, aid: '0', scy: 'none', net: 'xhttp', type: 'none', host: argoDomain, path: '/vmess-argo', tls: 'tls', sni: argoDomain, mode: 'packet-up'};
   const vmess = `vmess://${Buffer.from(JSON.stringify(vmessJson)).toString('base64')}`;
-  
-  // 3. Trojan XHTTP
   const trojan = `trojan://${UUID}@${CFIP}:${CFPORT}?security=tls&sni=${argoDomain}&fp=firefox&type=xhttp&mode=packet-up&host=${argoDomain}&path=%2Ftrojan-argo#${nodeName}_Trojan_2026`;
 
-  // 使用数组合并确保每一行是一个节点，且用标准换行符分隔
-  const subContentArray = [vless, vmess, trojan];
-  const subRawText = subContentArray.join('\n');
+  const subRawText = [vless, vmess, trojan].join('\n');
   const encodedSub = Buffer.from(subRawText).toString('base64');
-  
   fs.writeFileSync(subPath, encodedSub);
-  console.log(`[订阅成功] 已生成 3 个 XHTTP 节点并存入 sub.txt`);
-
-  // 设置订阅路由
+  
   app.get(`/${SUB_PATH}`, (req, res) => {
     res.set('Content-Type', 'text/plain; charset=utf-8');
     res.send(encodedSub);
   });
 }
 
-// --- 核心逻辑 3: 启动与运行 ---
+// --- 3. 核心运行逻辑 ---
 async function startserver() {
   const arch = (os.arch() === 'arm64' || os.arch() === 'aarch64') ? 'arm64' : 'amd64';
   const baseUrl = `https://${arch}.ssss.nyc.mn`;
 
   try {
     await generateConfig();
-    console.log(`[系统] 正在下载组件...`);
+    console.log(`[System] Downloading components for ${arch}...`);
     await downloadFile(`${baseUrl}/web`, webPath);
     await downloadFile(`${baseUrl}/bot`, botPath);
     if (NEZHA_SERVER && NEZHA_KEY) await downloadFile(`${baseUrl}/v1`, nzPath);
@@ -116,20 +106,21 @@ async function startserver() {
     [webPath, botPath, nzPath].forEach(p => { if(fs.existsSync(p)) fs.chmodSync(p, 0o777); });
 
     exec(`nohup ${webPath} -c ${configPath} >/dev/null 2>&1 &`);
-    
     setTimeout(() => {
       const argoArgs = `tunnel --no-autoupdate run --token ${ARGO_AUTH}`;
       exec(`nohup ${botPath} ${argoArgs} >/dev/null 2>&1 &`);
-      console.log("[Argo] 隧道已启动");
     }, 3000);
 
     if (NEZHA_SERVER && NEZHA_KEY) {
       exec(`nohup ${nzPath} -s ${NEZHA_SERVER} -p ${NEZHA_KEY} --tls >/dev/null 2>&1 &`);
     }
 
-    setTimeout(() => generateLinks(ARGO_DOMAIN), 10000);
+    if (AUTO_ACCESS && PROJECT_URL) {
+      axios.post('https://oooo.serv00.net/add-url', { url: PROJECT_URL }).catch(() => {});
+    }
 
-  } catch (err) { console.error("部署异常:", err); }
+    setTimeout(() => generateLinks(ARGO_DOMAIN), 10000);
+  } catch (err) { console.error("Startup failed:", err); }
 }
 
 function downloadFile(url, savePath) {
@@ -147,6 +138,6 @@ async function getMetaInfo() {
   } catch (e) { return 'Global_Node'; }
 }
 
-app.get("/", (req, res) => res.send("2026 XHTTP Service is Active"));
+app.get("/", (req, res) => res.send("2026 XHTTP Service Active"));
 startserver();
-app.listen(PORT);
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
